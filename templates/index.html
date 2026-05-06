@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AgroVision AI</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>AgroVision AI</h1>
+    <p>Monitoramento com YOLO + Agente com Ollama</p>
+  </header>
+
+  <main class="container">
+    <section class="card">
+      <h2>Camera em tempo real</h2>
+      <div>
+        <img class="stream" src="/video_feed" alt="Stream da camera" />
+      </div>
+
+      <div class="status-grid">
+        <div class="badge">Status: <strong id="cameraStatus">...</strong></div>
+        <div class="badge">Fonte: <strong id="sourceType">...</strong></div>
+        <div class="badge">Frame ao vivo: <strong id="hasFrame">...</strong></div>
+        <div class="badge">Agente: <strong id="agentStatus">...</strong></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Eventos recentes</h2>
+      <div id="eventsContainer">
+        {% if events and events|length > 0 %}
+        <ul class="list">
+          {% for event in events %}
+          <li class="item">
+            <img src="{{ event.image_path }}" alt="Evidencia {{ event.label }}" />
+            <div>
+              <strong>{{ event.label }}</strong>
+              <p>Confianca: {{ '%.2f'|format(event.confidence) }}</p>
+              <p>{{ event.event_time }}</p>
+            </div>
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p class="note">Nenhum evento detectado ainda.</p>
+        {% endif %}
+      </div>
+
+      <hr />
+
+      <h2>{{ agent_name }}</h2>
+      <div class="chat-box">
+        <div id="chatLog" class="chat-log">
+          <div class="chat-entry"><strong>Agente:</strong> Pronto para analisar os eventos recentes.</div>
+        </div>
+        <textarea
+          id="chatQuestion"
+          class="chat-input"
+          placeholder="Ex.: Leia os eventos recentes, avalie o risco e recomende a proxima acao."
+        ></textarea>
+        <div class="row">
+          <span class="note">Use Ctrl+Enter para enviar rapidamente.</span>
+          <button id="askBtn" class="btn" type="button">Perguntar ao agente</button>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>

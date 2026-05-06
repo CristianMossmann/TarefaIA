@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.env
+
+# Runtime data
+*.db
+*.sqlite
+*.sqlite3
+
+# YOLO outputs and captures
+runs/
+static/captures/
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
+Manuais/
