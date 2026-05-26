@@ -116,7 +116,7 @@ def load_settings() -> Settings:
         agent_event_limit=_to_int(os.getenv("AGENT_EVENT_LIMIT", "12"), 12),
         templates_dir=templates_dir,
         static_dir=static_dir,
-        scraping_weather_location=os.getenv("SCRAPING_WEATHER_LOCATION", "Cascavel"),
+        scraping_weather_location=os.getenv("SCRAPING_WEATHER_LOCATION", "San Ysidro,CA"),
         scraping_weather_ttl=_to_int(os.getenv("SCRAPING_WEATHER_TTL", "900"), 900),
         scraping_commodities_ttl=_to_int(os.getenv("SCRAPING_COMMODITIES_TTL", "1800"), 1800),
         scraping_request_timeout=_to_int(os.getenv("SCRAPING_REQUEST_TIMEOUT", "8"), 8),
