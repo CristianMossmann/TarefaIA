@@ -150,31 +150,64 @@ Se estiver tudo certo, o campo `answer` retorna texto do modelo (ex.: `OK`).
 ## Camada de Web Scraping
 
 O pacote `services/scraping/` busca dados publicos e gratuitos para
-enriquecer o sistema:
+enriquecer o sistema. Documentacao tecnica completa esta em
+[`REVISAO.md` — Parte 4](REVISAO.md#parte-4--camada-de-web-scraping)
+(tres camadas de protecao, matriz de erros, integracao). Resumo abaixo.
 
-- **Clima** via `wttr.in` (sem chave de API). Justificativa: o sistema
-  detecta movimentacao em ambiente agricola, e o "normal" depende
-  fortemente do clima. O contexto climatico em cache eh injetado no
-  prompt do agente Ollama em cada `/chat`.
-- **Cotacoes agro** via `noticiasagricolas.com.br`. Justificativa:
-  picos de movimentacao costumam acompanhar dias de alta nos precos
-  (mais caminhoes, mais pessoas).
+### Fontes
 
-Boas praticas aplicadas:
+- **Clima** via `wttr.in` (sem chave de API). O contexto climatico eh
+  injetado no prompt do agente Ollama em cada `/chat`.
+- **Cotacoes agro** via `noticiasagricolas.com.br` (HTML publico).
 
-- Cliente HTTP com timeout, User-Agent declarado e limite de payload (1 MB).
-- Cache em memoria (TTL configuravel) para nao bater na fonte a cada refresh.
-- Rate limiter (janela deslizante de 60s) para nao sobrecarregar a fonte.
-- Tratamento de erro: a rota devolve `503` com `status="error"` se a fonte estiver fora.
-- Saida sempre em JSON estruturado.
+### Arquitetura do pacote
 
-Variaveis de ambiente da camada de scraping:
+```
+services/scraping/
+├── http_client.py        — timeout, User-Agent, payload <= 1 MB
+├── rate_limiter.py       — janela deslizante 60s
+├── cache.py              — TTL em memoria, thread-safe
+├── weather_scraper.py    — wttr.in (?format=j1)
+├── commodity_scraper.py  — parser HTML tolerante a layout
+└── scraping_service.py   — fachada: cache -> rate limit -> scraper
+```
 
-- `SCRAPING_WEATHER_LOCATION` (default `Cascavel`)
+### Controle de carga (em camadas)
+
+| Camada               | Default          | Resolve                                       |
+|----------------------|------------------|-----------------------------------------------|
+| Cache TTL (clima)    | 15 min           | "Nao consulte de novo cedo demais"            |
+| Cache TTL (cotacoes) | 30 min           | mesmo, com horizonte maior                    |
+| Rate limiter         | 10 req/min       | Picos: se cache invalidar em loop, trava aqui |
+| HTTP timeout         | 8s por request   | Toda requisicao termina rapido                |
+| Teto de payload      | 1 MB             | Fonte hostil nao explode memoria              |
+
+Sem cache, o dashboard geraria ~90 req/h por usuario. Com cache, sao
+~6 req/h totais — independente de quantos usuarios estejam conectados.
+
+### Comportamento em erro
+
+| Cenario                    | Resposta HTTP | `status` no JSON | Fonte tocada? |
+|----------------------------|---------------|------------------|---------------|
+| OK + cache hit             | `200`         | `ok`             | Nao           |
+| OK + cache miss            | `200`         | `ok`             | Sim (1 req)   |
+| Fonte fora / parser falhou | `503`         | `error`          | Tentou        |
+| Rate limit estourado       | `503`         | `error`          | **Nao**       |
+
+A aplicacao principal (camera, YOLO, chat) **nunca** quebra quando o
+scraping falha — eh estritamente lateral.
+
+### Variaveis de ambiente
+
+- `SCRAPING_WEATHER_LOCATION` (default `San Ysidro,CA` — alinhado com a camera default)
 - `SCRAPING_WEATHER_TTL` (segundos, default `900`)
 - `SCRAPING_COMMODITIES_TTL` (segundos, default `1800`)
 - `SCRAPING_REQUEST_TIMEOUT` (segundos, default `8`)
 - `SCRAPING_MAX_RPM` (requisicoes por minuto, default `10`)
+
+> Se voce trocar `CAMERA_SOURCE` para outra regiao, lembre de atualizar
+> `SCRAPING_WEATHER_LOCATION` junto — caso contrario o clima nao bate
+> com a cena monitorada.
 
 ## Troubleshooting
 
