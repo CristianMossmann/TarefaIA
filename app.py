@@ -1,14 +1,23 @@
-from fastapi import FastAPI, Request
+import asyncio
+import logging
+
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+
 from services.capture_store import CaptureStore
 from services.config import settings
 from services.event_repository import EventRepository
 from services.monitoring_agent import build_agent_messages, build_agent_status
-from services.ollama_client import OllamaClient
+from services.ollama_client import OllamaClient, OllamaUnavailableError
 from services.schemas import ChatRequest, ChatResponse
+from services.scraping import ScrapingService
 from services.video_monitor import VideoMonitor
+
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s :: %(message)s")
+logger = logging.getLogger(__name__)
 
 
 app = FastAPI(title=settings.app_title)
@@ -22,6 +31,13 @@ ollama_client = OllamaClient(
     model=settings.ollama_model,
     timeout_seconds=settings.ollama_timeout,
     keep_alive=settings.ollama_keep_alive,
+)
+scraping_service = ScrapingService(
+    weather_location=settings.scraping_weather_location,
+    weather_ttl_seconds=settings.scraping_weather_ttl,
+    commodities_ttl_seconds=settings.scraping_commodities_ttl,
+    request_timeout=settings.scraping_request_timeout,
+    max_requests_per_minute=settings.scraping_max_rpm,
 )
 video_monitor = VideoMonitor(
     camera_source=settings.camera_source,
@@ -69,7 +85,7 @@ def health() -> dict:
 
 
 @app.get("/events")
-def get_events(limit: int = 50):
+def get_events(limit: int = Query(default=50, ge=1, le=200)):
     return JSONResponse(content=event_repository.list_events(limit))
 
 
@@ -104,10 +120,31 @@ def agent_status() -> dict:
 
 
 @app.post("/chat", response_model=ChatResponse)
-def chat(payload: ChatRequest):
+async def chat(payload: ChatRequest):
     events = event_repository.list_events(settings.agent_event_limit)
     history = [msg.model_dump() for msg in payload.history]
-    messages = build_agent_messages(payload.question, history, events)
-    answer = ollama_client.chat(messages)
+    weather_snapshot = scraping_service.weather_snapshot_for_agent()
+    messages = build_agent_messages(payload.question, history, events, weather_snapshot)
+
+    try:
+        answer = await asyncio.to_thread(ollama_client.chat, messages)
+    except OllamaUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
 
     return ChatResponse(answer=answer, model=settings.ollama_model)
+
+
+@app.get("/scraping/weather")
+async def scraping_weather():
+    result = await asyncio.to_thread(scraping_service.get_weather)
+    if result["status"] != "ok":
+        return JSONResponse(content=result, status_code=503)
+    return result
+
+
+@app.get("/scraping/commodities")
+async def scraping_commodities():
+    result = await asyncio.to_thread(scraping_service.get_commodities)
+    if result["status"] != "ok":
+        return JSONResponse(content=result, status_code=503)
+    return result

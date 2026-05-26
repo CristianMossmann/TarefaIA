@@ -71,7 +71,12 @@ def build_event_context(events: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def build_agent_messages(question: str, history: list[dict], events: list[dict]) -> list[dict]:
+def build_agent_messages(
+    question: str,
+    history: list[dict],
+    events: list[dict],
+    weather_snapshot: str | None = None,
+) -> list[dict]:
     system_prompt = (
         f"Voce e o {AGENT_PROFILE.name}, um agente de {AGENT_PROFILE.role}. "
         f"Objetivo: {AGENT_PROFILE.goal} "
@@ -83,12 +88,17 @@ def build_agent_messages(question: str, history: list[dict], events: list[dict])
         "Quando fizer sentido, organize a resposta em: Leitura, Risco e Recomendacao."
     )
 
-    return [
+    messages: list[dict] = [
         {"role": "system", "content": system_prompt},
         {"role": "system", "content": build_event_context(events)},
-        *normalize_history(history),
-        {"role": "user", "content": question.strip()},
     ]
+
+    if weather_snapshot:
+        messages.append({"role": "system", "content": weather_snapshot})
+
+    messages.extend(normalize_history(history))
+    messages.append({"role": "user", "content": question.strip()})
+    return messages
 
 
 def build_agent_status(events: list[dict]) -> dict:
