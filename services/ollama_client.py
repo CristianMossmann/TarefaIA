@@ -1,8 +1,22 @@
 from __future__ import annotations
 
 import json
+import logging
 import urllib.error
 import urllib.request
+
+
+logger = logging.getLogger(__name__)
+
+
+OFFLINE_MESSAGE = (
+    "O servico de IA esta temporariamente indisponivel. "
+    "Tente novamente em instantes."
+)
+
+
+class OllamaUnavailableError(RuntimeError):
+    pass
 
 
 class OllamaClient:
@@ -41,17 +55,19 @@ class OllamaClient:
 
         try:
             data = self._post_json(self.base_chat_url, payload)
-            message = data.get("message", {})
-            content = (message.get("content") or "").strip()
-            return content or "Sem resposta do modelo no momento."
         except urllib.error.URLError as exc:
-            return (
-                "Nao foi possivel conectar ao Ollama. "
-                "Verifique se o servico esta ativo em http://127.0.0.1:11434. "
-                f"Detalhe tecnico: {exc}"
-            )
-        except Exception as exc:
-            return f"Falha ao consultar o Ollama: {exc}"
+            logger.warning("Falha ao conectar ao Ollama: %s", exc)
+            raise OllamaUnavailableError(OFFLINE_MESSAGE) from exc
+        except TimeoutError as exc:
+            logger.warning("Timeout consultando Ollama: %s", exc)
+            raise OllamaUnavailableError(OFFLINE_MESSAGE) from exc
+        except json.JSONDecodeError as exc:
+            logger.error("Resposta do Ollama nao foi JSON valido: %s", exc)
+            raise OllamaUnavailableError(OFFLINE_MESSAGE) from exc
+
+        message = data.get("message", {})
+        content = (message.get("content") or "").strip()
+        return content or "Sem resposta do modelo no momento."
 
     def warmup(self) -> None:
         payload = {
@@ -62,6 +78,5 @@ class OllamaClient:
         }
         try:
             self._post_json(self.base_chat_url, payload)
-        except Exception:
-            # Warmup falhou; o sistema continua funcional e tentara novamente no primeiro chat.
-            return
+        except Exception as exc:  # noqa: BLE001 - warmup nao pode quebrar o startup
+            logger.info("Warmup do Ollama falhou (sera retentado no primeiro chat): %s", exc)

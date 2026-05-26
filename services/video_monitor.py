@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import os
+import logging
 import threading
 import time
+import uuid
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +12,9 @@ import cv2
 from ultralytics import YOLO
 
 from services.event_repository import EventRepository
+
+
+logger = logging.getLogger(__name__)
 
 
 class VideoMonitor:
@@ -92,17 +96,17 @@ class VideoMonitor:
             self._connected = cap.isOpened()
 
             if not self._connected:
-                print("[camera] Falha ao abrir fonte. Tentando reconectar...")
+                logger.warning("Falha ao abrir fonte de video. Tentando reconectar em %ss.", self.reconnect_seconds)
                 time.sleep(self.reconnect_seconds)
                 continue
 
-            print("[camera] Fonte iniciada com sucesso.")
+            logger.info("Fonte de video iniciada com sucesso.")
 
             while self._running:
                 ok, frame = cap.read()
                 if not ok:
                     self._connected = False
-                    print("[camera] Stream indisponivel. Reconectando...")
+                    logger.warning("Stream indisponivel. Reconectando...")
                     break
 
                 self._connected = True
@@ -157,16 +161,16 @@ class VideoMonitor:
             self.last_frame = frame.copy()
 
     def _save_alert_frame(self, frame, label: str, confidence: float) -> None:
-        event_id = datetime.now().strftime("%H%M%S")
-        filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{label}_{event_id}.jpg"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        unique_suffix = uuid.uuid4().hex[:8]
+        filename = f"{timestamp}_{label}_{unique_suffix}.jpg"
         filepath = self.save_dir / filename
 
-        os.makedirs(self.save_dir, exist_ok=True)
         cv2.imwrite(str(filepath), frame)
         image_path = f"/static/captures/{filename}"
 
         self.event_repository.save_event(label, confidence, image_path)
-        print(f"[ALERTA] {label} detectado. Evidencia salva em {filepath}")
+        logger.info("Alerta %s detectado (conf=%.2f). Evidencia: %s", label, confidence, filepath)
 
     def get_last_frame_jpeg(self) -> bytes | None:
         with self.last_frame_lock:

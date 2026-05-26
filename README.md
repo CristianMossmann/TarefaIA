@@ -144,6 +144,37 @@ Se estiver tudo certo, o campo `answer` retorna texto do modelo (ex.: `OK`).
 - `GET /camera/status`: status da camera/fonte
 - `GET /agent/status`: status do agente
 - `POST /chat`: pergunta contextual para o agente
+- `GET /scraping/weather`: clima atual + previsao (camada de scraping)
+- `GET /scraping/commodities`: cotacoes agro (camada de scraping)
+
+## Camada de Web Scraping
+
+O pacote `services/scraping/` busca dados publicos e gratuitos para
+enriquecer o sistema:
+
+- **Clima** via `wttr.in` (sem chave de API). Justificativa: o sistema
+  detecta movimentacao em ambiente agricola, e o "normal" depende
+  fortemente do clima. O contexto climatico em cache eh injetado no
+  prompt do agente Ollama em cada `/chat`.
+- **Cotacoes agro** via `noticiasagricolas.com.br`. Justificativa:
+  picos de movimentacao costumam acompanhar dias de alta nos precos
+  (mais caminhoes, mais pessoas).
+
+Boas praticas aplicadas:
+
+- Cliente HTTP com timeout, User-Agent declarado e limite de payload (1 MB).
+- Cache em memoria (TTL configuravel) para nao bater na fonte a cada refresh.
+- Rate limiter (janela deslizante de 60s) para nao sobrecarregar a fonte.
+- Tratamento de erro: a rota devolve `503` com `status="error"` se a fonte estiver fora.
+- Saida sempre em JSON estruturado.
+
+Variaveis de ambiente da camada de scraping:
+
+- `SCRAPING_WEATHER_LOCATION` (default `Cascavel`)
+- `SCRAPING_WEATHER_TTL` (segundos, default `900`)
+- `SCRAPING_COMMODITIES_TTL` (segundos, default `1800`)
+- `SCRAPING_REQUEST_TIMEOUT` (segundos, default `8`)
+- `SCRAPING_MAX_RPM` (requisicoes por minuto, default `10`)
 
 ## Troubleshooting
 
