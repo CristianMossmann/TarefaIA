@@ -207,35 +207,143 @@ def chat(payload: ChatRequest):
 
 ## Parte 4 — Camada de Web Scraping
 
-Ver `services/scraping/` e seção dedicada no final do README do projeto.
-Justificativa, fontes, limites, formato e integração estão lá; o resumo está abaixo.
-
 ### Dado coletado e por quê
 
-**Dado:** previsão do tempo da localidade configurada + cotações de commodities agrícolas (soja, milho, boi gordo).
+**Dados:** previsão do tempo da localidade da câmera (default `San Ysidro,CA`, alinhada com o `CAMERA_SOURCE` default da Caltrans) + cotações de commodities agrícolas (soja, milho, boi gordo, café, trigo).
 
 **Por que isso enriquece o AgroVision:**
-- O sistema detecta movimentação de pessoas, veículos e máquinas em ambiente agrícola.
-- Clima muda drasticamente o que é "normal" — em chuva forte, **ausência** de máquinas é esperada; em dia seco, ausência pode indicar paralisação. O agente Ollama recebe esse contexto e qualifica melhor o alerta.
-- Cotação de commodities ajuda a interpretar picos de movimentação: dia de alta no boi gordo costuma trazer mais caminhões e pessoas para a fazenda; o operador entende o aumento como **planejado**, não anomalia.
+- O sistema detecta movimentação de pessoas, veículos e máquinas. Sem contexto externo, o agente trata todo evento da mesma forma.
+- **Clima muda o que é "normal":** chuva forte + ausência de máquinas = esperado; dia seco + ausência = paralisação suspeita. O snapshot do clima é injetado no prompt do Ollama em todo `/chat`, então o agente qualifica o alerta com contexto real.
+- **Cotações agro explicam picos:** dia de alta no boi gordo costuma trazer mais caminhões; sem essa leitura, o operador veria anomalia onde há movimentação planejada.
 
 ### Fontes (públicas e gratuitas)
 
-| Dado          | Fonte                            | Tipo de coleta            |
-|---------------|----------------------------------|---------------------------|
-| Clima atual / forecast | `wttr.in` (formato JSON `?format=j1`) | HTTP GET, sem chave |
-| Cotações agro | `melhorcambio.com.br` / fallback estático | HTML, BeautifulSoup-like (parser stdlib) |
+| Dado            | Fonte                          | Tipo de coleta                            | Chave de API? |
+|-----------------|--------------------------------|-------------------------------------------|---------------|
+| Clima + 3 dias  | `wttr.in/{local}?format=j1`    | HTTP GET, resposta JSON                   | Não           |
+| Cotações agro   | `noticiasagricolas.com.br/cotacoes/` | HTML público, parser via `html.parser` da stdlib | Não           |
 
-Ambas são públicas, sem cadastro, sem chave de API.
+### Estrutura do pacote `services/scraping/`
 
-### Requisitos técnicos atendidos
+```
+services/scraping/
+├── __init__.py             — exporta ScrapingService
+├── http_client.py          — HTTPClient: timeout, User-Agent, limite de payload
+├── rate_limiter.py         — RateLimiter: janela deslizante de 60s
+├── cache.py                — TTLCache: cache em memória thread-safe
+├── weather_scraper.py      — wttr.in (JSON) + normalização
+├── commodity_scraper.py    — HTML parser tolerante a mudanças de layout
+└── scraping_service.py     — fachada que orquestra cache → rate limit → scraper
+```
 
-- ✔ **Função/serviço separado**: `services/scraping/` (pacote isolado).
-- ✔ **Fonte pública e gratuita**: wttr.in (clima) — sem chave; HTML público para cotações.
-- ✔ **Tratamento de erro**: `try/except` por scraper; retorna `ScrapingResult(status="error", ...)` em vez de quebrar.
-- ✔ **Limite de requisições**: `RateLimiter` (janela deslizante) — máximo configurável por host.
-- ✔ **Dados estruturados em JSON**: todo retorno é `dict` serializável.
-- ✔ **Integração com o sistema**: rotas `/scraping/weather` e `/scraping/commodities`; painel no dashboard; **contexto do clima é injetado no prompt do agente Ollama** quando há cache válido.
-- ✔ **Cache com TTL**: evita re-scraping a cada refresh do dashboard.
+Cada arquivo tem **uma única responsabilidade** — facilita substituir uma fonte sem mexer no resto.
 
-Detalhes técnicos da implementação estão nos próprios arquivos do pacote `services/scraping/`.
+### Controle de carga (três camadas que atuam juntas)
+
+Esta é a parte que diferencia "raspar dados" de "scraping educado". Cada camada resolve um problema distinto:
+
+| Camada                    | Onde                                | Resolve                                                              |
+|---------------------------|-------------------------------------|----------------------------------------------------------------------|
+| **Cache TTL**             | `cache.py` + TTLs em `.env`         | "Não consulte de novo cedo demais" — reduz volume base               |
+| **Rate Limiter**          | `rate_limiter.py`                   | "Mesmo com bug, não passe de N req/min" — limita picos               |
+| **HTTP timeout + payload**| `http_client.py`                    | "Toda requisição termina; payload nunca explode memória"             |
+
+#### 1. Cache com TTL (defesa principal)
+
+`services/scraping/cache.py` — dicionário em memória, thread-safe, com expiração por chave.
+
+Valores default (`.env`):
+```
+SCRAPING_WEATHER_TTL=900       # 15 minutos
+SCRAPING_COMMODITIES_TTL=1800  # 30 minutos
+```
+
+Cálculo de impacto:
+- Dashboard atualiza clima a cada 60s e commodities a cada 120s (`static/dashboard.js`).
+- **Sem cache:** ~60 req/h para clima + ~30 req/h para commodities = **90 req/h por usuário**.
+- **Com cache:** ~4 req/h para clima + ~2 req/h para commodities = **6 req/h totais**.
+
+A maior parte das requisições do dashboard nunca sai do servidor — o `ScrapingService` consulta o cache antes de chamar o `RateLimiter` ou o scraper.
+
+#### 2. Rate Limiter (rede de segurança)
+
+`services/scraping/rate_limiter.py` — janela deslizante de 60s, default `SCRAPING_MAX_RPM=10`.
+
+```python
+class RateLimiter:
+    def acquire(self) -> None:
+        # remove timestamps mais antigos que 60s
+        # se ainda restam >= max_requests no minuto, levanta RateLimitExceeded
+        # caso contrario, registra a chamada e libera
+```
+
+Protege contra três cenários onde o cache **não** ajuda:
+
+1. Cache expirou no mesmo instante em que múltiplos clientes fazem refresh.
+2. Bug futuro que invalide o cache em loop (ex.: scraper devolvendo erro e código tentando de novo).
+3. Restart do servidor com vários usuários conectados (cache vazio + burst inicial).
+
+Comportamento quando estoura: o `ScrapingService` captura `RateLimitExceeded` e devolve:
+
+```json
+{ "status": "error", "source": "wttr.in", "message": "Limite de requisicoes atingido. Tente em instantes." }
+```
+
+A rota responde com **HTTP 503**. A fonte externa **não é tocada**.
+
+#### 3. HTTP client (timeout + teto de payload)
+
+`services/scraping/http_client.py`:
+
+```
+SCRAPING_REQUEST_TIMEOUT=8     # 8s por requisição
+MAX_RESPONSE_BYTES = 1_048_576 # 1 MB (constante no código)
+```
+
+- **Timeout** garante que uma requisição lenta não congele o slot no rate limiter — abre vaga rapidamente para outras chamadas.
+- **Teto de 1 MB** protege se a fonte ficar hostil (ex.: site comprometido devolvendo arquivo gigante). `urlopen.read(MAX_RESPONSE_BYTES + 1)` corta a leitura; o cliente compara e levanta `HTTPClientError` se ultrapassou.
+- **User-Agent declarado** (`AgroVisionBot/1.0 ...`) — boa prática de scraping ético; identifica quem está acessando.
+
+### Tabela de configuração (todas as variáveis)
+
+| Variável                       | Default            | O que controla                                       |
+|--------------------------------|--------------------|------------------------------------------------------|
+| `SCRAPING_WEATHER_LOCATION`    | `San Ysidro,CA`    | Localização passada ao wttr.in (alinhada com câmera) |
+| `SCRAPING_WEATHER_TTL`         | `900` (15 min)     | Tempo que o clima fica no cache                      |
+| `SCRAPING_COMMODITIES_TTL`     | `1800` (30 min)    | Tempo que as cotações ficam no cache                 |
+| `SCRAPING_REQUEST_TIMEOUT`     | `8` segundos       | Timeout por requisição HTTP individual               |
+| `SCRAPING_MAX_RPM`             | `10` req/min       | Teto do rate limiter (janela de 60s)                 |
+
+### Matriz de comportamento sob erro
+
+| Cenário                           | Cache | Resposta da rota               | Fonte externa? |
+|-----------------------------------|-------|--------------------------------|----------------|
+| Tudo OK, dentro do TTL            | Hit   | `200` + JSON com `status=ok`   | Não            |
+| Tudo OK, TTL expirado             | Miss  | `200` + JSON com `status=ok`   | Sim (1 req)    |
+| Fonte fora do ar                  | Miss  | `503` + `status=error`         | Tentou e falhou|
+| Layout do site mudou (parser não acha) | Miss | `503` + `status=error`     | Tentou e falhou|
+| Excedeu 10 req/min                | Miss  | `503` + `status=error`         | **Não tocada** |
+| Erro inesperado no parser         | Miss  | `503` + `status=error`         | Talvez (uma vez)|
+
+Em **nenhum** cenário de erro a aplicação principal (câmera, YOLO, chat) é afetada — o scraping é estritamente lateral.
+
+### Integração no sistema
+
+| Ponto de integração              | Como funciona                                                                 |
+|----------------------------------|-------------------------------------------------------------------------------|
+| Rotas HTTP                       | `GET /scraping/weather` e `GET /scraping/commodities` em `app.py`             |
+| Dashboard                        | Painel "Contexto externo" em `templates/index.html`, atualizado pelo JS       |
+| Prompt do agente Ollama          | `scraping_service.weather_snapshot_for_agent()` retorna string injetada como mensagem `system` em `build_agent_messages` |
+| Execução assíncrona              | Rotas usam `asyncio.to_thread(...)` — scraping nunca bloqueia o event loop    |
+
+### Requisitos do enunciado vs. entrega
+
+| Requisito (enunciado)                                | Onde está atendido                                                  |
+|------------------------------------------------------|---------------------------------------------------------------------|
+| Função/serviço separado para scraping                | Pacote `services/scraping/` isolado                                 |
+| Uso de fonte pública e gratuita                      | wttr.in + noticiasagricolas (sem chave)                             |
+| Tratamento de erro caso o site esteja fora do ar     | `_error(...)` retorna `status=error`; rota devolve `503`            |
+| Limite de requisições para não sobrecarregar a fonte | `RateLimiter` + cache TTL (camadas combinadas)                      |
+| Organização dos dados em JSON                        | `ScrapingService` retorna `dict` serializável; resposta é JSON puro |
+| Integração com alguma parte do sistema               | Rota HTTP + painel no dashboard + prompt do LLM                     |
+| Explicação de por que a informação é relevante       | Seção "Dado coletado e por quê" acima                               |
