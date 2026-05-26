@@ -39,8 +39,9 @@ COMMODITY_TARGETS: dict[str, list[str]] = {
     "trigo": ["trigo"],
 }
 
-# Numero plausivel: 1 a 6 digitos inteiros + opcional decimais com , ou .
-NUMBER_RE = re.compile(r"\b(\d{1,6}(?:[.,]\d{1,4})?)\b")
+# Preco plausivel: digitos seguidos OBRIGATORIAMENTE por separador decimal +
+# 2 a 4 casas. Isso elimina datas (26, 2026) e numeros inteiros aleatorios.
+NUMBER_RE = re.compile(r"\b(\d{1,6}[.,]\d{2,4})\b")
 
 
 class _TextOnlyParser(HTMLParser):
@@ -101,6 +102,13 @@ class CommodityScraper:
 
         for line in lines:
             lower = line.lower()
+            # Pula linhas que mencionam varias commodities juntas (titulo/SEO).
+            mentioned = sum(
+                1 for terms in COMMODITY_TARGETS.values() if any(t in lower for t in terms)
+            )
+            if mentioned >= 3:
+                continue
+
             for slug, terms in COMMODITY_TARGETS.items():
                 if slug in seen:
                     continue
